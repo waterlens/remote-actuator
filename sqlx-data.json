@@ -1,0 +1,41 @@
+{
+  "db": "SQLite",
+  "1e95d9d8eccadf8f2420dccc5d030cbd22aa7e364994dba3b15e755d3100ffd1": {
+    "describe": {
+      "columns": [],
+      "nullable": [],
+      "parameters": {
+        "Right": 4
+      }
+    },
+    "query": "INSERT INTO history (uuid, ct, time, result)\nVALUES (?, ?, ?, ?);\n"
+  },
+  "2cd40a26da6675ff9dddbe927041eefa2899c8f53fad9807f207cccaf91033eb": {
+    "describe": {
+      "columns": [
+        {
+          "name": "EXISTS (\n    SELECT 1 FROM nonce WHERE nonce.nonce = ?\n)",
+          "ordinal": 0,
+          "type_info": "Int"
+        }
+      ],
+      "nullable": [
+        false
+      ],
+      "parameters": {
+        "Right": 1
+      }
+    },
+    "query": "SELECT EXISTS (\n    SELECT 1 FROM nonce WHERE nonce.nonce = ?\n)\n"
+  },
+  "881d6f8cc7e5aae7800a491b9fa5cc1fdeae661ca379637f0aa3bcd9fea50bc8": {
+    "describe": {
+      "columns": [],
+      "nullable": [],
+      "parameters": {
+        "Right": 2
+      }
+    },
+    "query": "INSERT INTO history (uuid, result)\nVALUES (?, ?);\n"
+  }
+}
