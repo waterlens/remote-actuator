@@ -1,6 +1,5 @@
 #!/usr/bin/env python
 import base64
-from distutils.file_util import write_file
 import json
 import subprocess
 import os
