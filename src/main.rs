@@ -1,11 +1,8 @@
 use std::{env, fs, io, path::PathBuf, sync::Arc, vec};
 
 use axum::{extract::Extension, http::StatusCode, routing::post, Json, Router};
-
 use duckscript::{runner, types::runtime::Context};
-use ed25519_dalek::{PublicKey, Signature, Verifier};
 use either::Either::{self, Left, Right};
-use futures::executor::block_on;
 use once_cell::sync::OnceCell;
 use serde_derive::{Deserialize, Serialize};
 use sha2::{Digest, Sha512};
@@ -15,18 +12,21 @@ use toml::value::Datetime;
 use walkdir::WalkDir;
 
 #[derive(Debug, Deserialize)]
+struct LocalConfigWrapper {
+    config: LocalConfig,
+}
+
+#[derive(Debug, Deserialize)]
 struct LocalConfig {
     listen: String,
-    key: String,
     database: PathBuf,
     workdir: PathBuf,
 }
 
 static CONFIG: OnceCell<LocalConfig> = OnceCell::new();
-static PKEY: OnceCell<PublicKey> = OnceCell::new();
 static DATABASE: OnceCell<SqlitePool> = OnceCell::new();
 
-impl LocalConfig {
+impl LocalConfigWrapper {
     fn read_config() -> io::Result<Self> {
         let content = fs::read_to_string("./config.toml")?;
         Ok(toml::from_str(&content)?)
@@ -42,12 +42,11 @@ struct TaskDescription {
 #[tokio::main]
 async fn main() {
     CONFIG
-        .set(LocalConfig::read_config().expect("expect a config.toml file"))
-        .unwrap();
-
-    let pub_key = &CONFIG.get().unwrap().key;
-    let pub_key = base64::decode(pub_key).expect("expect a right ed25519 public key");
-    PKEY.set(PublicKey::from_bytes(&pub_key).expect("expect a right ed25519 public key"))
+        .set(
+            LocalConfigWrapper::read_config()
+                .expect("expect a right config.toml file")
+                .config,
+        )
         .unwrap();
 
     let db = &CONFIG.get().unwrap().database;
@@ -59,17 +58,17 @@ async fn main() {
         .expect("unable to connect to sqlite database");
 
     sqlx::query(
-"\
+        "\
 CREATE TABLE IF NOT EXISTS history ( 
     uuid      TEXT PRIMARY KEY,
-    ct        TEXT NOT NULL,
-    time      TEXT NOT NULL,
+    ct        TEXT,
+    time      TEXT,
     result    TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS nonce (
     nonce     TEXT PRIMARY KEY
 );
-CREATE UNIQUE INDEX IF NOT EXISTS commit_index ON history (
+CREATE INDEX IF NOT EXISTS commit_index ON history (
     ct
 );
 ",
@@ -114,30 +113,30 @@ async fn post_task(
     let b = &payload.task_bundle;
     let s = &payload.task_signature;
 
-    let pk = PKEY.get().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
     let s = base64::decode(s.as_bytes()).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let s = Signature::from_bytes(s.as_slice()).map_err(|_| StatusCode::BAD_REQUEST)?;
     let h = Sha512::digest(b.as_bytes());
-    pk.verify(h.as_slice(), &s)
-        .map_err(|_| StatusCode::FORBIDDEN)?;
+    if h.as_slice() != s.as_slice() {
+        return Err(StatusCode::FORBIDDEN);
+    }
 
     let uuid = uuid::Uuid::new_v4();
-    std::thread::spawn(move || {
-        futures::executor::block_on(run_bundle(uuid, payload.task_bundle, permission))
-    });
+    std::thread::spawn(move || run_bundle(uuid, payload.task_bundle, permission));
 
     Ok(uuid.as_hyphenated().to_string())
 }
 
-async fn run_bundle(uuid: uuid::Uuid, bundle: String, permission: OwnedSemaphorePermit) {
+fn run_bundle(uuid: uuid::Uuid, bundle: String, permission: OwnedSemaphorePermit) {
+    let rt = tokio::runtime::Runtime::new().unwrap();
     match run_bundle_impl(uuid, bundle, permission) {
         Ok(result) => {
             let json = serde_json::to_string(&result).expect("unable convert to json string");
             let uuid = uuid.as_hyphenated().to_string();
             let time = result.time.to_string();
-            block_on(
+            dbg!(&json);
+            dbg!(&uuid);
+            rt.block_on(
                 sqlx::query!(
-"\
+                    "\
 INSERT INTO history (uuid, ct, time, result)
 VALUES (?, ?, ?, ?);
 ",
@@ -153,9 +152,11 @@ VALUES (?, ?, ?, ?);
         Err(err) => {
             let json = serde_json::to_string(&err).expect("unable convert to json string");
             let uuid = uuid.as_hyphenated().to_string();
-            block_on(
+            dbg!(&json);
+            dbg!(&uuid);
+            rt.block_on(
                 sqlx::query!(
-"\
+                    "\
 INSERT INTO history (uuid, result)
 VALUES (?, ?);
 ",
@@ -208,7 +209,7 @@ struct TaskResult {
 
 #[derive(Debug, Serialize)]
 struct ExecutionRecord {
-    time: Datetime,
+    time: String,
     uuid: uuid::Uuid,
     commit: Option<String>,
     result: Vec<(PathBuf, Either<TaskResult, ScriptExecutionError>)>,
@@ -252,22 +253,29 @@ fn validate_bundle_configure(cfg: &BundleConfig) -> Result<(), BundleExecutionEr
     }
 
     let nonce = task.nonce.as_str();
-    let nonce_exists: i32 = block_on(
-        sqlx::query_scalar!(
-"\
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let nonce_exists: i32 = rt
+        .block_on(
+            sqlx::query_scalar!(
+                "\
 SELECT EXISTS (
     SELECT 1 FROM nonce WHERE nonce.nonce = ?
 )
 ",
-            nonce
+                nonce
+            )
+            .fetch_one(DATABASE.get().unwrap()),
         )
-        .fetch_one(DATABASE.get().unwrap()),
-    )
-    .map_err(|_| DatabaseQueryFailed)?;
+        .map_err(|_| DatabaseQueryFailed)?;
 
     if nonce_exists != 0 {
         return Err(NonceExisted);
     }
+
+    rt.block_on(
+        sqlx::query!("INSERT INTO nonce VALUES (?)", nonce).execute(DATABASE.get().unwrap()),
+    )
+    .map_err(|_| DatabaseQueryFailed)?;
 
     Ok(())
 }
@@ -279,22 +287,23 @@ fn run_bundle_impl(
 ) -> Result<ExecutionRecord, BundleExecutionError> {
     use BundleExecutionError::*;
     let bundle = base64::decode(bundle.as_str()).map_err(|_| BundleDecodingFailed)?;
-
     let bundle_dir_path = &CONFIG.get().unwrap().workdir;
 
     fs::remove_dir_all(bundle_dir_path.as_path()).map_err(|_| BundleDirCleanFailed)?;
     fs::create_dir_all(bundle_dir_path.as_path()).map_err(|_| BundleDirCreationFailed)?;
 
     let lz4_decoder = lz4_flex::frame::FrameDecoder::new(bundle.as_slice());
-
     let mut ar = tar::Archive::new(lz4_decoder);
     ar.set_preserve_permissions(true);
     ar.set_overwrite(true);
+    ar.set_ignore_zeros(true);
     ar.set_preserve_mtime(true);
-    ar.unpack(bundle_dir_path.as_path())
-        .map_err(|_| UnpackingFailed)?;
+    ar.unpack(bundle_dir_path.as_path()).map_err(|err| {
+        dbg!(err);
+        UnpackingFailed
+    })?;
 
-    let bundle_config_path = bundle_dir_path.join("/bundle.toml");
+    let bundle_config_path = bundle_dir_path.join("./bundle.toml");
     let meta = fs::metadata(bundle_config_path.as_path()).map_err(|_| BundleConfigNotFound)?;
     if !meta.is_file() {
         return Err(BundleConfigNotAFile);
@@ -416,7 +425,7 @@ fn run_bundle_impl(
         .collect();
 
     let record = ExecutionRecord {
-        time: task.time.clone(),
+        time: task.time.to_string(),
         commit: task.commit.clone(),
         result: final_result,
         uuid,
@@ -437,13 +446,28 @@ mod tests {
     }
 
     #[test]
+    fn test_local_config() {
+        let cfg: LocalConfigWrapper = toml::from_str(
+            r#"
+[config]
+listen = "[::]:8668"
+key = ""
+database = "/run/remote-actuator/history.sqlite"
+workdir = "/run/remote-actuator/runs/"
+"#,
+        )
+        .unwrap();
+        println!("{:?}", cfg);
+    }
+
+    #[test]
     fn test_duck_script() {
         let script = r#"
 output = exec /usr/bin/echo 'hello, world!'
 stdout = set ${output.stdout}
 stderr = set ${output.stderr}
 exit_code = set ${output.code}
-                    "#;
+"#;
         let mut ctx = Context::new();
         duckscriptsdk::load(&mut ctx.commands).unwrap();
         ctx = runner::run_script(script, ctx).unwrap();
@@ -466,8 +490,7 @@ before = """
 script = """
 """
 after = """
-"""
-        "#;
+""""#;
         println!("{}", config);
         let config_value: toml::Value = toml::from_str(config).unwrap();
         println!("{:#?}", config_value);

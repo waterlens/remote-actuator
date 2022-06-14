@@ -1,0 +1,4 @@
+[config]
+listen = "[::]:8668"
+database = "./data.db"
+workdir = "./runs"

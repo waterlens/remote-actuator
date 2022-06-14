@@ -2,3 +2,5 @@
 /.vscode
 /.env
 *.db
+*.tar
+*.lz4

@@ -43,7 +43,6 @@ after = """
 ```toml
 [config]
 listen = "[::]:8668"
-key = "AAAAC3NzaC1lZDI1NTE5AAAAIFT96jZ2GsimHfkhIjUA0FejiqlRfHIcOlgctZpSOfsG"
 database = "/run/remote-actuator/history.sqlite"
 workdir = "/run/remote-actuator/runs/"
 ```
