@@ -26,3 +26,6 @@ walkdir = "2"
 either = { version = "1", features = ["serde"] }
 textnonce = "1"
 chrono = "0.4"
+log = "0.4.0"
+env_logger = "0.9"
+colored = "2"

@@ -1,8 +1,19 @@
 use std::{env, fs, io, path::PathBuf, sync::Arc, vec};
 
-use axum::{extract::Extension, http::StatusCode, routing::post, Json, Router};
+use axum::{
+    body::Body,
+    extract::Extension,
+    http::{Request, Response, StatusCode},
+    middleware::{self, Next},
+    response::IntoResponse,
+    routing::post,
+    Json, Router,
+};
+use colored::Colorize;
 use duckscript::{runner, types::runtime::Context};
 use either::Either::{self, Left, Right};
+use env_logger::Env;
+use log::{info, warn};
 use once_cell::sync::OnceCell;
 use serde_derive::{Deserialize, Serialize};
 use sha2::{Digest, Sha512};
@@ -41,6 +52,10 @@ struct TaskDescription {
 
 #[tokio::main]
 async fn main() {
+    let env = Env::default().default_filter_or("info,sqlx::query=warn");
+    env_logger::init_from_env(env);
+    info!("Remote actuator is starting up");
+
     CONFIG
         .set(
             LocalConfigWrapper::read_config()
@@ -48,6 +63,8 @@ async fn main() {
                 .config,
         )
         .unwrap();
+
+    info!("Reading configure file done");
 
     let db = &CONFIG.get().unwrap().database;
     let db = SqlitePoolOptions::new()
@@ -79,22 +96,43 @@ CREATE INDEX IF NOT EXISTS commit_index ON history (
 
     DATABASE.set(db).unwrap();
 
+    info!("Connected to the database");
+
     let semaphore = Arc::new(Semaphore::new(1));
     let app = Router::new()
         .route("/tasks", post(post_task))
-        .layer(Extension(semaphore));
+        .layer(Extension(semaphore))
+        .layer(middleware::from_fn(print_request_response));
 
-    axum::Server::bind(
-        &CONFIG
-            .get()
-            .unwrap()
-            .listen
-            .parse()
-            .expect("expect a valid listening address"),
-    )
-    .serve(app.into_make_service())
-    .await
-    .unwrap();
+    let addr_port = &CONFIG
+        .get()
+        .unwrap()
+        .listen
+        .parse()
+        .expect("expect a valid listening address");
+
+    let server = axum::Server::bind(addr_port).serve(app.into_make_service());
+    info!("Listening on {}", addr_port.to_string().green());
+
+    server.await.unwrap();
+}
+
+async fn print_request_response(
+    req: Request<Body>,
+    next: Next<Body>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let (parts, body) = req.into_parts();
+    info!(
+        "{} {}",
+        parts.method.to_string().blue(),
+        parts.uri
+    );
+    let req = Request::from_parts(parts, body);
+    let res = next.run(req).await;
+    let (parts, body) = res.into_parts();
+    info!("{}", parts.status);
+    let res = Response::from_parts(parts, body);
+    Ok(res)
 }
 
 async fn post_task(
@@ -102,6 +140,7 @@ async fn post_task(
     Extension(semaphore): Extension<Arc<Semaphore>>,
 ) -> Result<String, StatusCode> {
     if semaphore.available_permits() == 0 {
+        warn!("Service is unavailable");
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
 
@@ -116,10 +155,12 @@ async fn post_task(
     let s = base64::decode(s.as_bytes()).map_err(|_| StatusCode::BAD_REQUEST)?;
     let h = Sha512::digest(b.as_bytes());
     if h.as_slice() != s.as_slice() {
+        warn!("Invalid digest");
         return Err(StatusCode::FORBIDDEN);
     }
 
     let uuid = uuid::Uuid::new_v4();
+    info!("New task with uuid {}", uuid.as_hyphenated().to_string());
     std::thread::spawn(move || run_bundle(uuid, payload.task_bundle, permission));
 
     Ok(uuid.as_hyphenated().to_string())
@@ -132,8 +173,6 @@ fn run_bundle(uuid: uuid::Uuid, bundle: String, permission: OwnedSemaphorePermit
             let json = serde_json::to_string(&result).expect("unable convert to json string");
             let uuid = uuid.as_hyphenated().to_string();
             let time = result.time.to_string();
-            dbg!(&json);
-            dbg!(&uuid);
             rt.block_on(
                 sqlx::query!(
                     "\
@@ -152,8 +191,6 @@ VALUES (?, ?, ?, ?);
         Err(err) => {
             let json = serde_json::to_string(&err).expect("unable convert to json string");
             let uuid = uuid.as_hyphenated().to_string();
-            dbg!(&json);
-            dbg!(&uuid);
             rt.block_on(
                 sqlx::query!(
                     "\
