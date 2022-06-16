@@ -1,4 +1,4 @@
-use std::{env, fs, io, path::PathBuf, sync::Arc, vec};
+use std::{env, fs, io, path::PathBuf, sync::Arc};
 
 use axum::{
     body::Body,
@@ -20,6 +20,7 @@ use sha2::{Digest, Sha512};
 use sqlx::{sqlite::SqlitePoolOptions, SqlitePool};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use toml::value::Datetime;
+use uuid::Uuid;
 use walkdir::WalkDir;
 
 #[derive(Debug, Deserialize)]
@@ -122,11 +123,7 @@ async fn print_request_response(
     next: Next<Body>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let (parts, body) = req.into_parts();
-    info!(
-        "{} {}",
-        parts.method.to_string().blue(),
-        parts.uri
-    );
+    info!("{} {}", parts.method.to_string().blue(), parts.uri);
     let req = Request::from_parts(parts, body);
     let res = next.run(req).await;
     let (parts, body) = res.into_parts();
@@ -159,14 +156,14 @@ async fn post_task(
         return Err(StatusCode::FORBIDDEN);
     }
 
-    let uuid = uuid::Uuid::new_v4();
+    let uuid = Uuid::new_v4();
     info!("New task with uuid {}", uuid.as_hyphenated().to_string());
     std::thread::spawn(move || run_bundle(uuid, payload.task_bundle, permission));
 
     Ok(uuid.as_hyphenated().to_string())
 }
 
-fn run_bundle(uuid: uuid::Uuid, bundle: String, permission: OwnedSemaphorePermit) {
+fn run_bundle(uuid: Uuid, bundle: String, permission: OwnedSemaphorePermit) {
     let rt = tokio::runtime::Runtime::new().unwrap();
     match run_bundle_impl(uuid, bundle, permission) {
         Ok(result) => {
@@ -218,7 +215,6 @@ struct Task {
     nonce: String,
     run: Run,
     commit: Option<String>,
-    repeat: Option<usize>,
     content: PathBuf,
 }
 
@@ -241,13 +237,13 @@ struct ExecResult {
 struct TaskResult {
     before: Option<ExecResult>,
     after: Option<ExecResult>,
-    script: Vec<ExecResult>,
+    script: ExecResult,
 }
 
 #[derive(Debug, Serialize)]
 struct ExecutionRecord {
     time: String,
-    uuid: uuid::Uuid,
+    uuid: Uuid,
     commit: Option<String>,
     result: Vec<(PathBuf, Either<TaskResult, ScriptExecutionError>)>,
 }
@@ -264,7 +260,6 @@ enum BundleExecutionError {
     ConfigWrongFormat,
     NoContentDir,
     UnableToChangeCurrentDir,
-    InvalidRepeatNum,
     DatabaseQueryFailed,
     NonceExisted,
 }
@@ -284,10 +279,6 @@ enum ScriptExecutionError {
 fn validate_bundle_configure(cfg: &BundleConfig) -> Result<(), BundleExecutionError> {
     use BundleExecutionError::*;
     let task = &cfg.task;
-
-    if task.repeat.unwrap_or(1) < 1 {
-        return Err(InvalidRepeatNum);
-    }
 
     let nonce = task.nonce.as_str();
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -318,7 +309,7 @@ SELECT EXISTS (
 }
 
 fn run_bundle_impl(
-    uuid: uuid::Uuid,
+    uuid: Uuid,
     bundle: String,
     _permission: OwnedSemaphorePermit,
 ) -> Result<ExecutionRecord, BundleExecutionError> {
@@ -425,22 +416,9 @@ fn run_bundle_impl(
                         None
                     };
 
-                    let mut script_out = vec![];
-                    let mut last_result_ctx = None;
-
-                    for _ in 0..task.repeat.unwrap_or(1) {
-                        let ctx = Context {
-                            variables: ctx.variables.clone(),
-                            state: ctx.state.clone(),
-                            commands: ctx.commands.clone(),
-                        };
-                        let new_ctx = runner::run_script(task.run.script.as_str(), ctx)
-                            .map_err(|_| ScriptFailed)?;
-                        script_out.push(mk_exec_result_from_ctx(&new_ctx)?);
-                        last_result_ctx = Some(new_ctx);
-                    }
-
-                    ctx = last_result_ctx.unwrap();
+                    ctx = runner::run_script(task.run.script.as_str(), ctx)
+                        .map_err(|_| ScriptFailed)?;
+                    let script_out = mk_exec_result_from_ctx(&ctx)?;
 
                     let after_script_out = if let Some(after) = &task.run.after {
                         ctx = runner::run_script(after.as_str(), ctx)
@@ -488,7 +466,6 @@ mod tests {
             r#"
 [config]
 listen = "[::]:8668"
-key = ""
 database = "/run/remote-actuator/history.sqlite"
 workdir = "/run/remote-actuator/runs/"
 "#,
@@ -518,7 +495,6 @@ exit_code = set ${output.code}
 nonce = "Ft8BCnVqqGIAAAAAhW+GaLdBA4NZcjq+"
 commit = "df6cc0ec563fd50e6e9fd6f1d6b9d1a315fc5402"
 time = 1979-05-27T07:32:00Z
-repeat = 3
 content = "./content"
 
 [task.run]
