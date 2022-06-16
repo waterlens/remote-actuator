@@ -28,6 +28,16 @@
     },
     "query": "SELECT EXISTS (\n    SELECT 1 FROM nonce WHERE nonce.nonce = ?\n)\n"
   },
+  "42b5f79f0a36a0f545fa78e7646f0672406d45b8ee09bb076521a8b71b05101d": {
+    "describe": {
+      "columns": [],
+      "nullable": [],
+      "parameters": {
+        "Right": 1
+      }
+    },
+    "query": "INSERT INTO nonce VALUES (?)"
+  },
   "881d6f8cc7e5aae7800a491b9fa5cc1fdeae661ca379637f0aa3bcd9fea50bc8": {
     "describe": {
       "columns": [],
