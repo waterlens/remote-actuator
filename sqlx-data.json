@@ -1,6 +1,26 @@
 {
   "db": "SQLite",
-  "1e95d9d8eccadf8f2420dccc5d030cbd22aa7e364994dba3b15e755d3100ffd1": {
+  "42b5f79f0a36a0f545fa78e7646f0672406d45b8ee09bb076521a8b71b05101d": {
+    "describe": {
+      "columns": [],
+      "nullable": [],
+      "parameters": {
+        "Right": 1
+      }
+    },
+    "query": "INSERT INTO nonce VALUES (?)"
+  },
+  "5c3bd586d951de20567bda56b65190a1490f31ec4bff0158475aa9635f35ef3e": {
+    "describe": {
+      "columns": [],
+      "nullable": [],
+      "parameters": {
+        "Right": 2
+      }
+    },
+    "query": "INSERT INTO history (uuid, result) VALUES (?, ?);"
+  },
+  "78fe84c463c87b62022264778bc491eb9121c88fd65b5de472624190f48f9dee": {
     "describe": {
       "columns": [],
       "nullable": [],
@@ -8,13 +28,49 @@
         "Right": 4
       }
     },
-    "query": "INSERT INTO history (uuid, ct, time, result)\nVALUES (?, ?, ?, ?);\n"
+    "query": "INSERT INTO history (uuid, ct, time, result) VALUES (?, ?, ?, ?);"
   },
-  "2cd40a26da6675ff9dddbe927041eefa2899c8f53fad9807f207cccaf91033eb": {
+  "b316870abc50ab95124d80b61844a5e659e53b9a753cb1670a089a30d278ae0f": {
     "describe": {
       "columns": [
         {
-          "name": "EXISTS (\n    SELECT 1 FROM nonce WHERE nonce.nonce = ?\n)",
+          "name": "uuid",
+          "ordinal": 0,
+          "type_info": "Text"
+        },
+        {
+          "name": "ct",
+          "ordinal": 1,
+          "type_info": "Text"
+        },
+        {
+          "name": "time",
+          "ordinal": 2,
+          "type_info": "Text"
+        },
+        {
+          "name": "result",
+          "ordinal": 3,
+          "type_info": "Text"
+        }
+      ],
+      "nullable": [
+        true,
+        true,
+        true,
+        false
+      ],
+      "parameters": {
+        "Right": 1
+      }
+    },
+    "query": "SELECT * FROM history WHERE history.uuid = ?;"
+  },
+  "ce15cd864eae568e4718cbb31677208b35dda3f21890e3c9e2806e27b0b950c9": {
+    "describe": {
+      "columns": [
+        {
+          "name": "EXISTS (SELECT 1 FROM nonce WHERE nonce.nonce = ?)",
           "ordinal": 0,
           "type_info": "Int"
         }
@@ -26,26 +82,42 @@
         "Right": 1
       }
     },
-    "query": "SELECT EXISTS (\n    SELECT 1 FROM nonce WHERE nonce.nonce = ?\n)\n"
+    "query": "SELECT EXISTS (SELECT 1 FROM nonce WHERE nonce.nonce = ?)"
   },
-  "42b5f79f0a36a0f545fa78e7646f0672406d45b8ee09bb076521a8b71b05101d": {
+  "e3e85be021893fcc4a70a845c2f49d93d00eca8eb579d6f2cab62bbea1c25b9e": {
     "describe": {
-      "columns": [],
-      "nullable": [],
+      "columns": [
+        {
+          "name": "uuid",
+          "ordinal": 0,
+          "type_info": "Text"
+        },
+        {
+          "name": "ct",
+          "ordinal": 1,
+          "type_info": "Text"
+        },
+        {
+          "name": "time",
+          "ordinal": 2,
+          "type_info": "Text"
+        },
+        {
+          "name": "result",
+          "ordinal": 3,
+          "type_info": "Text"
+        }
+      ],
+      "nullable": [
+        true,
+        true,
+        true,
+        false
+      ],
       "parameters": {
         "Right": 1
       }
     },
-    "query": "INSERT INTO nonce VALUES (?)"
-  },
-  "881d6f8cc7e5aae7800a491b9fa5cc1fdeae661ca379637f0aa3bcd9fea50bc8": {
-    "describe": {
-      "columns": [],
-      "nullable": [],
-      "parameters": {
-        "Right": 2
-      }
-    },
-    "query": "INSERT INTO history (uuid, result)\nVALUES (?, ?);\n"
+    "query": "SELECT * FROM history WHERE history.ct = ?;"
   }
 }

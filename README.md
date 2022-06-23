@@ -17,7 +17,7 @@ This actuator is used to control a remote device to execute some tasks.
 
 - `GET /tasks/commit/{commit-hash}`
 
-- `GET /database/{key}`
+- `GET /database`
 
 
 ## Task Bundle Configure Example

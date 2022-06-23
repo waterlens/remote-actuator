@@ -1,12 +1,12 @@
 use std::{env, fs, io, path::PathBuf, str::FromStr, sync::Arc};
 
 use axum::{
-    body::Body,
-    extract::Extension,
-    http::{Request, Response, StatusCode},
+    body::{Body, StreamBody},
+    extract::{Extension, Path},
+    http::{header, Request, Response, StatusCode},
     middleware::{self, Next},
-    response::IntoResponse,
-    routing::post,
+    response::{AppendHeaders, IntoResponse},
+    routing::{get, post},
     Json, Router,
 };
 use colored::Colorize;
@@ -23,6 +23,7 @@ use sqlx::{
 };
 use strum_macros::AsRefStr;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio_util::io::ReaderStream;
 use toml::value::Datetime;
 use uuid::Uuid;
 use walkdir::WalkDir;
@@ -183,6 +184,9 @@ CREATE INDEX IF NOT EXISTS commit_index ON history (
     let semaphore = Arc::new(Semaphore::new(1));
     let app = Router::new()
         .route("/tasks", post(post_task))
+        .route("/tasks/uuid/:uuid", get(get_task_by_uuid))
+        .route("/tasks/commit/:commit", get(get_task_by_commit))
+        .route("/database", get(get_database))
         .layer(Extension(semaphore))
         .layer(middleware::from_fn(print_request_response));
 
@@ -213,6 +217,53 @@ async fn print_request_response(
     Ok(res)
 }
 
+async fn get_database() -> impl IntoResponse {
+    let db = &CONFIG.get().unwrap().database;
+    let file = match tokio::fs::File::open(db).await {
+        Ok(file) => file,
+        Err(_) => return Err(StatusCode::NOT_FOUND),
+    };
+
+    let stream = ReaderStream::new(file);
+    let body = StreamBody::new(stream);
+
+    let headers = AppendHeaders([
+        (header::CONTENT_TYPE, "application/octet-stream"),
+        (
+            header::CONTENT_DISPOSITION,
+            "attachment; filename=\"data.db\"",
+        ),
+    ]);
+
+    Ok((headers, body))
+}
+
+async fn get_task_by_uuid(Path(uuid): Path<Uuid>) -> Result<String, StatusCode> {
+    let uuid_s = uuid.as_simple().to_string();
+    let tasks: Vec<_> = sqlx::query!("SELECT * FROM history WHERE history.uuid = ?;", uuid_s)
+        .fetch_all(DATABASE.get().unwrap())
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?
+        .into_iter()
+        .map(|record| record.result)
+        .collect();
+
+    Ok(format!("[{}]", tasks.join(",")))
+}
+
+async fn get_task_by_commit(Path(commit): Path<String>) -> Result<String, StatusCode> {
+    let commit_s = commit.as_str();
+    let tasks: Vec<_> = sqlx::query!("SELECT * FROM history WHERE history.ct = ?;", commit_s)
+        .fetch_all(DATABASE.get().unwrap())
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?
+        .into_iter()
+        .map(|record| record.result)
+        .collect();
+
+    Ok(format!("[{}]", tasks.join(",")))
+}
+
 async fn post_task(
     Json(payload): Json<TaskDescription>,
     Extension(semaphore): Extension<Arc<Semaphore>>,
@@ -238,10 +289,10 @@ async fn post_task(
     }
 
     let uuid = Uuid::new_v4();
-    info!("New task with uuid {}", uuid.as_hyphenated().to_string());
+    info!("New task with uuid {}", uuid.as_simple().to_string());
     std::thread::spawn(move || run_bundle(uuid, payload.task_bundle, permission));
 
-    Ok(uuid.as_hyphenated().to_string())
+    Ok(uuid.as_simple().to_string())
 }
 
 fn run_bundle(uuid: Uuid, bundle: String, permission: OwnedSemaphorePermit) {
@@ -249,17 +300,14 @@ fn run_bundle(uuid: Uuid, bundle: String, permission: OwnedSemaphorePermit) {
     match run_bundle_impl(uuid, bundle, permission) {
         Ok(result) => {
             let json = serde_json::to_string(&result).expect("unable convert to json string");
-            let uuid = uuid.as_hyphenated().to_string();
+            let uuid = uuid.as_simple().to_string();
             let time = result.time.to_string();
 
             info!("Run bundle {} succeeded", uuid.as_str());
 
             rt.block_on(
                 sqlx::query!(
-                    "\
-INSERT INTO history (uuid, ct, time, result)
-VALUES (?, ?, ?, ?);
-",
+                    "INSERT INTO history (uuid, ct, time, result) VALUES (?, ?, ?, ?);",
                     uuid,
                     result.commit,
                     time,
@@ -271,7 +319,7 @@ VALUES (?, ?, ?, ?);
         }
         Err(err) => {
             let json = serde_json::to_string(&err).expect("unable convert to json string");
-            let uuid = uuid.as_hyphenated().to_string();
+            let uuid = uuid.as_simple().to_string();
 
             error!(
                 "Run bundle {} failed due to {}",
@@ -281,10 +329,7 @@ VALUES (?, ?, ?, ?);
 
             rt.block_on(
                 sqlx::query!(
-                    "\
-INSERT INTO history (uuid, result)
-VALUES (?, ?);
-",
+                    "INSERT INTO history (uuid, result) VALUES (?, ?);",
                     uuid,
                     json
                 )
@@ -304,11 +349,7 @@ fn validate_bundle_configure(cfg: &BundleConfig) -> Result<(), BundleExecutionEr
     let nonce_exists: i32 = rt
         .block_on(
             sqlx::query_scalar!(
-                "\
-SELECT EXISTS (
-    SELECT 1 FROM nonce WHERE nonce.nonce = ?
-)
-",
+                "SELECT EXISTS (SELECT 1 FROM nonce WHERE nonce.nonce = ?)",
                 nonce
             )
             .fetch_one(DATABASE.get().unwrap()),
