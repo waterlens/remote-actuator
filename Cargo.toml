@@ -27,7 +27,6 @@ tar = "0.4"
 uuid = { version = "1.1.2", features = ["v4", "fast-rng", "serde"] }
 walkdir = "2"
 either = { version = "1", features = ["serde"] }
-textnonce = "1"
 chrono = "0.4"
 log = "0.4.0"
 env_logger = "0.9"
