@@ -1,4 +1,4 @@
-use std::{env, fs, io, path::PathBuf, sync::Arc};
+use std::{env, fs, io, path::PathBuf, str::FromStr, sync::Arc};
 
 use axum::{
     body::Body,
@@ -13,11 +13,15 @@ use colored::Colorize;
 use duckscript::{runner, types::runtime::Context};
 use either::Either::{self, Left, Right};
 use env_logger::Env;
-use log::{info, warn};
+use log::{error, info, warn};
 use once_cell::sync::OnceCell;
 use serde_derive::{Deserialize, Serialize};
 use sha2::{Digest, Sha512};
-use sqlx::{sqlite::SqlitePoolOptions, SqlitePool};
+use sqlx::{
+    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+    ConnectOptions, Connection, SqlitePool,
+};
+use strum_macros::AsRefStr;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use toml::value::Datetime;
 use uuid::Uuid;
@@ -33,6 +37,76 @@ struct LocalConfig {
     listen: String,
     database: PathBuf,
     workdir: PathBuf,
+}
+
+#[derive(Debug, Deserialize)]
+struct BundleConfig {
+    task: Task,
+}
+
+#[derive(Debug, Deserialize)]
+struct Task {
+    time: Datetime,
+    nonce: String,
+    run: Run,
+    commit: Option<String>,
+    content: PathBuf,
+}
+
+#[derive(Debug, Deserialize)]
+struct Run {
+    before: Option<String>,
+    script: String,
+    after: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ExecResult {
+    code: i32,
+    stdout: Option<String>,
+    stderr: Option<String>,
+    extra: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct TaskResult {
+    before: Option<ExecResult>,
+    after: Option<ExecResult>,
+    script: ExecResult,
+}
+
+#[derive(Debug, Serialize)]
+struct ExecutionRecord {
+    time: String,
+    uuid: Uuid,
+    commit: Option<String>,
+    result: Vec<(PathBuf, Either<TaskResult, ScriptExecutionError>)>,
+}
+
+#[derive(Debug, Serialize, AsRefStr)]
+enum BundleExecutionError {
+    BundleDecodingFailed,
+    BundleDirCleanFailed,
+    BundleDirCreationFailed,
+    UnpackingFailed,
+    BundleConfigNotFound,
+    BundleConfigNotAFile,
+    ReadConfigFailed,
+    ConfigWrongFormat,
+    NoContentDir,
+    UnableToChangeCurrentDir,
+    DatabaseQueryFailed,
+    NonceExisted,
+}
+
+#[derive(Debug, Serialize)]
+enum ScriptExecutionError {
+    DuckScriptInitializationFailed,
+    BeforeScriptFailed,
+    ScriptFailed,
+    AfterScriptFailed,
+    NoOutputExitCode,
+    ExitCodeIsNotNumber,
 }
 
 static CONFIG: OnceCell<LocalConfig> = OnceCell::new();
@@ -68,10 +142,17 @@ async fn main() {
     info!("Reading configure file done");
 
     let db = &CONFIG.get().unwrap().database;
+    let db_uri = "sqlite:".to_string() + db.to_str().expect("unable to make database str");
+    let db = SqliteConnectOptions::from_str(db_uri.as_str())
+        .expect("unable to create connection options")
+        .create_if_missing(true)
+        .connect()
+        .await
+        .expect("unable to connect to sqlite database");
+
+    db.close();
     let db = SqlitePoolOptions::new()
-        .connect(
-            ("sqlite:".to_string() + db.to_str().expect("unable to make database str")).as_str(),
-        )
+        .connect(db_uri.as_str())
         .await
         .expect("unable to connect to sqlite database");
 
@@ -170,6 +251,9 @@ fn run_bundle(uuid: Uuid, bundle: String, permission: OwnedSemaphorePermit) {
             let json = serde_json::to_string(&result).expect("unable convert to json string");
             let uuid = uuid.as_hyphenated().to_string();
             let time = result.time.to_string();
+
+            info!("Run bundle {} succeeded", uuid.as_str());
+
             rt.block_on(
                 sqlx::query!(
                     "\
@@ -188,6 +272,13 @@ VALUES (?, ?, ?, ?);
         Err(err) => {
             let json = serde_json::to_string(&err).expect("unable convert to json string");
             let uuid = uuid.as_hyphenated().to_string();
+
+            error!(
+                "Run bundle {} failed due to {}",
+                uuid.as_str(),
+                err.as_ref()
+            );
+
             rt.block_on(
                 sqlx::query!(
                     "\
@@ -202,78 +293,6 @@ VALUES (?, ?);
             .expect("insert error failed");
         }
     }
-}
-
-#[derive(Debug, Deserialize)]
-struct BundleConfig {
-    task: Task,
-}
-
-#[derive(Debug, Deserialize)]
-struct Task {
-    time: Datetime,
-    nonce: String,
-    run: Run,
-    commit: Option<String>,
-    content: PathBuf,
-}
-
-#[derive(Debug, Deserialize)]
-struct Run {
-    before: Option<String>,
-    script: String,
-    after: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct ExecResult {
-    code: i32,
-    stdout: String,
-    stderr: String,
-    extra: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct TaskResult {
-    before: Option<ExecResult>,
-    after: Option<ExecResult>,
-    script: ExecResult,
-}
-
-#[derive(Debug, Serialize)]
-struct ExecutionRecord {
-    time: String,
-    uuid: Uuid,
-    commit: Option<String>,
-    result: Vec<(PathBuf, Either<TaskResult, ScriptExecutionError>)>,
-}
-
-#[derive(Debug, Serialize)]
-enum BundleExecutionError {
-    BundleDecodingFailed,
-    BundleDirCleanFailed,
-    BundleDirCreationFailed,
-    UnpackingFailed,
-    BundleConfigNotFound,
-    BundleConfigNotAFile,
-    ReadConfigFailed,
-    ConfigWrongFormat,
-    NoContentDir,
-    UnableToChangeCurrentDir,
-    DatabaseQueryFailed,
-    NonceExisted,
-}
-
-#[derive(Debug, Serialize)]
-enum ScriptExecutionError {
-    DuckScriptInitializationFailed,
-    BeforeScriptFailed,
-    ScriptFailed,
-    AfterScriptFailed,
-    NoOutputStderr,
-    NoOutputStdout,
-    NoOutputExitCode,
-    ExitCodeIsNotNumber,
 }
 
 fn validate_bundle_configure(cfg: &BundleConfig) -> Result<(), BundleExecutionError> {
@@ -314,12 +333,16 @@ fn run_bundle_impl(
     _permission: OwnedSemaphorePermit,
 ) -> Result<ExecutionRecord, BundleExecutionError> {
     use BundleExecutionError::*;
-    let bundle = base64::decode(bundle.as_str()).map_err(|_| BundleDecodingFailed)?;
-    let bundle_dir_path = &CONFIG.get().unwrap().workdir;
 
-    fs::remove_dir_all(bundle_dir_path.as_path()).map_err(|_| BundleDirCleanFailed)?;
+    let bundle_dir_path = &CONFIG.get().unwrap().workdir;
+    if bundle_dir_path.exists() {
+        info!("Remove previous bundle directory");
+        fs::remove_dir_all(bundle_dir_path.as_path()).map_err(|_| BundleDirCleanFailed)?;
+    }
     fs::create_dir_all(bundle_dir_path.as_path()).map_err(|_| BundleDirCreationFailed)?;
 
+    info!("Start to decode bundle content");
+    let bundle = base64::decode(bundle.as_str()).map_err(|_| BundleDecodingFailed)?;
     let lz4_decoder = lz4_flex::frame::FrameDecoder::new(bundle.as_slice());
     let mut ar = tar::Archive::new(lz4_decoder);
     ar.set_preserve_permissions(true);
@@ -336,6 +359,17 @@ fn run_bundle_impl(
     if !meta.is_file() {
         return Err(BundleConfigNotAFile);
     }
+
+    info!(
+        "Read bundle configure at {}",
+        bundle_config_path
+            .canonicalize()
+            .unwrap_or_default()
+            .as_os_str()
+            .to_str()
+            .unwrap_or_default()
+            .blue()
+    );
 
     let config: BundleConfig = toml::from_str(
         fs::read_to_string(bundle_config_path.as_path())
@@ -356,11 +390,23 @@ fn run_bundle_impl(
 
     let current_dir = env::current_dir().map_err(|_| UnableToChangeCurrentDir)?;
     env::set_current_dir(bundle_content_path.as_path()).map_err(|_| UnableToChangeCurrentDir)?;
+    info!(
+        "Change to working directory {}",
+        env::current_dir()
+            .map_err(|_| UnableToChangeCurrentDir)?
+            .as_os_str()
+            .to_str()
+            .unwrap_or_default()
+            .blue()
+    );
 
-    let entries: Vec<_> = WalkDir::new(&task.content)
+    let entries: Vec<_> = WalkDir::new(".")
         .into_iter()
         .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_file())
         .collect();
+
+    info!("The bundle has {} entries", entries.len());
 
     let final_result: Vec<(_, _)> = entries
         .iter()
@@ -370,35 +416,37 @@ fn run_bundle_impl(
                 .map(|entry| -> Result<TaskResult, ScriptExecutionError> {
                     use ScriptExecutionError::*;
                     let path = entry.path();
+                    info!(
+                        "{}",
+                        "------------------------------------------------------------".yellow()
+                    );
+                    info!(
+                        ":: {}",
+                        path.as_os_str().to_str().unwrap_or_default().blue()
+                    );
 
                     let mut ctx = Context::new();
                     duckscriptsdk::load(&mut ctx.commands)
                         .map_err(|_| DuckScriptInitializationFailed)?;
 
-                    ctx.variables.insert(
-                        "ra.content.path".to_string(),
-                        path.as_os_str().to_string_lossy().to_string(),
-                    );
+                    let s = "ra.content.path";
+                    let path = path.as_os_str().to_string_lossy().to_string();
+                    ctx.variables.insert(s.to_string(), path);
 
                     let mk_exec_result_from_ctx =
                         |ctx: &Context| -> Result<_, ScriptExecutionError> {
                             let extra = ctx.variables.get("ra.result.extra").cloned();
-                            let stderr = ctx
-                                .variables
-                                .get("ra.result.stderr")
-                                .ok_or(NoOutputStderr)?
-                                .to_string();
-                            let stdout = ctx
-                                .variables
-                                .get("ra.result.stdout")
-                                .ok_or(NoOutputStdout)?
-                                .to_string();
+                            let stderr = ctx.variables.get("ra.result.stderr").cloned();
+                            let stdout = ctx.variables.get("ra.result.stdout").cloned();
+
+                            let s_code = "ra.result.code";
                             let code = ctx
                                 .variables
                                 .get("ra.result.code")
                                 .ok_or(NoOutputExitCode)?
                                 .parse::<i32>()
                                 .map_err(|_| ExitCodeIsNotNumber)?;
+                            info!(":: {} = {}", s_code.green(), code);
 
                             Ok(ExecResult {
                                 extra,
@@ -411,7 +459,9 @@ fn run_bundle_impl(
                     let before_script_out = if let Some(before) = &task.run.before {
                         ctx = runner::run_script(before.as_str(), ctx)
                             .map_err(|_| BeforeScriptFailed)?;
-                        Some(mk_exec_result_from_ctx(&ctx)?)
+                        let r = mk_exec_result_from_ctx(&ctx)?;
+                        info!(":: Running before script was done");
+                        Some(r)
                     } else {
                         None
                     };
@@ -419,11 +469,14 @@ fn run_bundle_impl(
                     ctx = runner::run_script(task.run.script.as_str(), ctx)
                         .map_err(|_| ScriptFailed)?;
                     let script_out = mk_exec_result_from_ctx(&ctx)?;
+                    info!(":: Running script was done");
 
                     let after_script_out = if let Some(after) = &task.run.after {
                         ctx = runner::run_script(after.as_str(), ctx)
                             .map_err(|_| AfterScriptFailed)?;
-                        Some(mk_exec_result_from_ctx(&ctx)?)
+                        let r = mk_exec_result_from_ctx(&ctx)?;
+                        info!(":: Running after script was done");
+                        Some(r)
                     } else {
                         None
                     };
@@ -446,6 +499,10 @@ fn run_bundle_impl(
         uuid,
     };
 
+    info!(
+        "Recover to normal directory {}",
+        current_dir.as_os_str().to_str().unwrap_or_default().blue()
+    );
     env::set_current_dir(current_dir.as_path()).map_err(|_| UnableToChangeCurrentDir)?;
 
     Ok(record)
